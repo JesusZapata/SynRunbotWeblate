@@ -1,19 +1,31 @@
+#!/usr/bin/python
 # coding: utf-8
 
 import os
+import sys
 import xmlrpclib
 import requests
 import subprocess
+import logging
 import ConfigParser
+
+
+logger = logging.getLogger('syncronize.py')
+logger.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+formatter = logging.Formatter('[%(asctime)s - %(name)s - %(levelname)s - %(message)s]')
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
 
 class Rpc(object):
 
-    def __init__(self, configuration):
-        self.url = '%s/xmlrpc/' % configuration.get('odoo', 'url')
-        self.db = configuration.get('odoo', 'db')
-        self.username = configuration.get('odoo', 'username')
-        self.password = configuration.get('odoo', 'password')
+    def __init__(self):
+        self.url = '%s/xmlrpc/' % os.environ.get('ODOO_URL', 'http://nappa.vauxoo.com:2406')
+        self.db = os.environ.get('ODOO_DB', 'openerp_test')
+        self.username = os.environ.get('ODOO_USERNAME', 'admin')
+        self.password = os.environ.get('ODOO_USERNAME', 'admin')
 
     def login(self):
         self._user = xmlrpclib.ServerProxy(self.url + 'common').login(
@@ -27,11 +39,6 @@ class Rpc(object):
 
 
 class WeblateAPI(object):
-
-    def __init__(self, configuration):
-        self._weblate_container = False
-        if configuration.has_section('docker'):
-            self._weblate_container = configuration.get('docker', 'name')
 
     def _init_api(self, url, token):
         self._url = url
@@ -50,12 +57,12 @@ class WeblateAPI(object):
                 and '@' in repo):
             repo = 'http://' + repo.split('@')[1:].pop().replace(':', '/')
         cmd = []
-        if self._weblate_container:
-            cmd.extend(['docker', 'exec', self._weblate_container])
         cmd.extend(['django-admin', 'shell', '-c',
                     'import weblate.trans.models.project as project;'
                     'project.Project(name=\'{0}\', slug=\'{0}\', web=\'{1}\').save()'.format(slug, repo)])
-        subprocess.check_output(cmd)
+        logger.debug('Create project "%s"' % slug)
+        logger.debug(' '.join(cmd))
+        print subprocess.check_output(cmd)
         return self._session.get(self._url + '/projects/%s/' % slug).json()
 
     def find_or_create_project(self, project):
@@ -74,11 +81,11 @@ class WeblateAPI(object):
 
     def create_component(self, project, branch):
         cmd = []
-        if self._weblate_container:
-            cmd.extend(['docker', 'exec', self._weblate_container])
         cmd.extend(['django-admin',
                     'import_project', project['slug'], project['web'],
                     branch['branch_name'], '**/i18n/*.po'])
+        logger.debug('Create component "%s:%s"' % (project['slug'], branch['branch_name']))
+        logger.debug(' '.join(cmd))
         print subprocess.check_output(cmd)
 
     def import_from_runbot(self, project, branches):
@@ -87,6 +94,7 @@ class WeblateAPI(object):
             'repo': project['name']
         })
         for branch in branches:
+            logger.debug('Processing branch "%s:%s"' % (project['name'], branch['branch_name']))
             self.create_component(project, branch)
 
     def _request_api(self, url):
@@ -95,9 +103,9 @@ class WeblateAPI(object):
 
 class SynRunbotWeblate(object):
 
-    def __init__(self, configuration):
-        self._rpc = Rpc(configuration)
-        self._wlapi = WeblateAPI(configuration)
+    def __init__(self):
+        self._rpc = Rpc()
+        self._wlapi = WeblateAPI()
 
     def sync(self):
         self._rpc.login()
@@ -105,6 +113,7 @@ class SynRunbotWeblate(object):
             [['weblate_token', '!=', ''], ['weblate_url', '!=', '']])
         repos = self._rpc.execute('runbot.repo', 'read', ids)
         for repo in repos:
+            logger.debug('Processing "%s" repository' % repo['name'])
             ids = self._rpc.execute('runbot.branch', 'search',
                 [['uses_weblate', '=', True], ['repo_id', '=', repo['id']]])
             branches = self._rpc.execute('runbot.branch', 'read', ids)
@@ -113,7 +122,4 @@ class SynRunbotWeblate(object):
 
 
 if __name__ == '__main__':
-    configuration = ConfigParser.ConfigParser()
-    configuration.readfp(open(os.path.join(os.getcwd(), 'synchronize.cfg')))
-
-    exit(SynRunbotWeblate(configuration).sync())
+    exit(SynRunbotWeblate().sync())
